@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  oracle-db:
+    image: gvenzl/oracle-xe:latest
+    container_name: oracle-db
+    environment:
+      - ORACLE_PASSWORD=oracle
+      - APP_USER=keycloak
+      - APP_USER_PASSWORD=keycloak
+      # default PDB service is XEPDB1 on 1521
+    ports:
+      - "1522:1521"
+      - "5501:5500"
+    networks:
+      - keycloak-oracle-net
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'select 1 from dual;' | sqlplus -s system/oracle@//localhost:1521/XEPDB1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: dev-keycloak-oracle
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+
+      - KC_DB=oracle
+      - KC_DB_URL=jdbc:oracle:thin:@//oracle-db:1521/XEPDB1
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_PASSWORD=keycloak
+
+      - KC_HEALTH_ENABLED=true
+      - KC_METRICS_ENABLED=true
+    command: ["start-dev", "--http-port=8280"]
+    ports:
+      - "8280:8280"
+    networks:
+      - keycloak-oracle-net
+    volumes:
+      - ./oracle-driver/ojdbc11.jar:/opt/keycloak/providers/ojdbc11.jar:ro
+
+networks:
+  keycloak-oracle-net:
+    driver: bridge

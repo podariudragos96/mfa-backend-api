@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  oracle-db:
+    image: gvenzl/oracle-xe:21-slim
+    container_name: oracle-xe
+    environment:
+      - ORACLE_PASSWORD=oracle          # password for SYS/SYSTEM
+      - APP_USER=keycloak               # app schema for Keycloak
+      - APP_USER_PASSWORD=keycloak
+    ports:
+      - "1522:1521"                     # host 1522 -> container 1521
+      - "5501:5500"                     # EM Express (optional)
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+    # Optional but nice: only start Keycloak after DB is actually ready
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'select 1 from dual;' | sqlplus -s system/oracle@//localhost:1521/XEPDB1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+    restart: unless-stopped
+
+  # Sidecar that downloads Oracle JDBC jars into a named volume (no host files needed)
+  jdbc-downloader:
+    image: curlimages/curl:8.10.1
+    container_name: jdbc-downloader
+    # If your network needs a proxy, add: -x http://proxy:port to both curls
+    command: >
+      sh -ce "
+      set -e;
+      curl -fsSL -o /providers/ojdbc17.jar  https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc17/23.6.0.24.10/ojdbc17-23.6.0.24.10.jar;
+      curl -fsSL -o /providers/orai18n.jar  https://repo1.maven.org/maven2/com/oracle/database/nls/orai18n/23.6.0.24.10/orai18n-23.6.0.24.10.jar
+      "
+    volumes:
+      - kc_providers:/providers
+    # We want this to finish successfully, then Keycloak may start
+    restart: "no"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: keycloak
+    depends_on:
+      oracle-db:
+        condition: service_healthy              # wait for DB
+      jdbc-downloader:
+        condition: service_completed_successfully  # wait until jars are downloaded
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - KC_DB=oracle
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_PASSWORD=keycloak
+      - KC_DB_URL=jdbc:oracle:thin:@//oracle-db:1521/XEPDB1
+      - KC_HOSTNAME_STRICT=false
+      - KC_HEALTH_ENABLED=true
+      - KC_METRICS_ENABLED=true
+    # Auto-build picks up providers from /opt/keycloak/providers (no Dockerfile needed)
+    command: ["start", "--auto-build"]
+    volumes:
+      - kc_providers:/opt/keycloak/providers
+    ports:
+      - "8180:8080"                     # use Keycloak at http://localhost:8180
+    restart: on-failure
+
+volumes:
+  oracle_data: {}
+  kc_providers: {}

@@ -1,0 +1,32 @@
+{
+  "realm": "testRealmBcrypt",
+  "enabled": true,
+  "users": [
+    {
+      "username": "dragos",
+      "enabled": true,
+      "emailVerified": false,
+      "credentials": [
+        {
+          "type": "password",
+          "userLabel": "imported-bcrypt",
+          "secretData": "{\"value\":\"$2a$12$JtwqDxWfZhA0OC4jc0Q9g.gDeJdQC9unN5DBd7Uk3sxlLZ/Yc5ysu\"}",
+          "credentialData": "{\"algorithm\":\"bcrypt\",\"hashIterations\":-1}"
+        }
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": false,
+      "credentials": [
+        {
+          "type": "password",
+          "userLabel": "imported-bcrypt",
+          "secretData": "{\"value\":\"$2a$10$eImiTXuWVxfM37uY4JANjQ8lR0vX2QW7jVt4i0XzVdF8h9sI1uW3K\"}",
+          "credentialData": "{\"algorithm\":\"bcrypt\",\"hashIterations\":-1}"
+        }
+      ]
+    }
+  ]
+}
