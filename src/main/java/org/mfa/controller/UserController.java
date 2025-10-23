@@ -1,5 +1,6 @@
 package org.mfa.controller;
 
+import lombok.RequiredArgsConstructor;
 import org.mfa.dto.ExportUserDto;
 import org.mfa.dto.UserDto;
 import org.mfa.service.UserService;
@@ -10,24 +11,19 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/realms/{realm}/users")
+@RequiredArgsConstructor
 public class UserController {
 
     private final UserService userService;
 
-    public UserController(UserService userService) {
-        this.userService = userService;
-    }
-
     @PostMapping
     public ResponseEntity<UserDto> createUser(@PathVariable String realm, @RequestBody UserDto userDto) {
-        UserDto created = userService.createUser(realm, userDto);
-        return ResponseEntity.status(201).body(created);
+        return ResponseEntity.status(201).body(userService.createUser(realm, userDto));
     }
 
     @GetMapping
     public ResponseEntity<List<UserDto>> listUsers(@PathVariable String realm) {
-        List<UserDto> users = userService.listUsers(realm);
-        return ResponseEntity.ok(users);
+        return ResponseEntity.ok(userService.listUsers(realm));
     }
 
     @DeleteMapping("/{userId}")
@@ -41,10 +37,8 @@ public class UserController {
             @PathVariable String realm,
             @PathVariable String userId,
             @RequestBody UserDto userDto) {
-        UserDto updated = userService.updateUser(realm, userId, userDto);
-        return ResponseEntity.ok(updated);
+        return ResponseEntity.ok(userService.updateUser(realm, userId, userDto));
     }
-
 
     @PostMapping("/{userId}/reset-password")
     public ResponseEntity<Void> triggerResetPassword(@PathVariable String realm, @PathVariable String userId) {

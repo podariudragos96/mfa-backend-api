@@ -12,15 +12,15 @@ import org.springframework.web.reactive.function.client.WebClient;
 public class KeycloakClientConfig {
 
     @Value("${keycloak.server-url}")
-    private String serverUrl;           // e.g., "http://localhost:8080"
+    private String serverUrl;
     @Value("${keycloak.realm}")
-    private String realm;               // e.g., "master" for admin user realm
+    private String realm;
     @Value("${keycloak.client-id}")
-    private String clientId;            // e.g., "admin-cli" or other client with admin access
+    private String clientId;
 //    @Value("${keycloak.client-secret:}")
-//    private String clientSecret;        // optional: required if client is confidential
+//    private String clientSecret;
     @Value("${keycloak.username}")
-    private String adminUsername;       // e.g., "admin"
+    private String adminUsername;
     @Value("${keycloak.password}")
     private String adminPassword;
 

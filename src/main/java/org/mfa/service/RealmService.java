@@ -9,8 +9,6 @@ import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.representations.idm.RoleRepresentation;
 import org.mfa.dto.CreateRealmRequest;
 import org.mfa.dto.RealmSummaryDto;
-import org.mfa.dto.ThemeSettingsDto;
-import org.mfa.dto.ThemeUpdateRequest;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;
@@ -111,36 +109,6 @@ public class RealmService {
                 .roles()
                 .get("realm-admin")
                 .toRepresentation();
-    }
-
-    public ThemeSettingsDto getTheme(String realmName) {
-        var rep = keycloak.realm(realmName).toRepresentation();
-        return new ThemeSettingsDto(
-                rep.getLoginTheme(),
-                rep.getAccountTheme(),
-                rep.getEmailTheme(),
-                rep.getAdminTheme()
-        );
-    }
-
-    public ThemeSettingsDto updateTheme(String realmName, ThemeUpdateRequest req) {
-        var realm = keycloak.realm(realmName);
-        var rep = realm.toRepresentation();
-
-        if (req.getLoginTheme() != null) rep.setLoginTheme(normalizeTheme(req.getLoginTheme()));
-        if (req.getAccountTheme() != null) rep.setAccountTheme(normalizeTheme(req.getAccountTheme()));
-        if (req.getEmailTheme() != null) rep.setEmailTheme(normalizeTheme(req.getEmailTheme()));
-        if (req.getAdminTheme() != null) rep.setAdminTheme(normalizeTheme(req.getAdminTheme()));
-
-        realm.update(rep);
-
-        var after = realm.toRepresentation();
-        return new ThemeSettingsDto(
-                after.getLoginTheme(),
-                after.getAccountTheme(),
-                after.getEmailTheme(),
-                after.getAdminTheme()
-        );
     }
 
     private String normalizeTheme(String v) {
