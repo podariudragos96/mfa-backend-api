@@ -7,8 +7,8 @@ import org.keycloak.admin.client.resource.RealmResource;
 import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.representations.idm.RoleRepresentation;
-import org.mfa.dto.CreateRealmRequest;
-import org.mfa.dto.RealmSummaryDto;
+import org.mfa.dto.UserGroupApiV1;
+import org.mfa.dto.UserGroupCreateRequestApiV1;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;
@@ -16,33 +16,73 @@ import java.util.List;
 
 @Service
 @RequiredArgsConstructor
-public class RealmService {
+public class UserGroupService {
 
     private final Keycloak keycloak;
 
     private static final String MFA_CLIENT_ID = "mfa-client";
     private static final String MFA_CLIENT_SECRET = "mfa-client-secret";
 
-    public void createRealm(CreateRealmRequest req) {
+    public void createRealm(UserGroupCreateRequestApiV1 req) {
         RealmRepresentation rep = new RealmRepresentation();
-        rep.setRealm(req.getRealmName());
+        rep.setRealm(req.getName());
         rep.setDisplayName(req.getDisplayName());
         rep.setEnabled(true);
 
         keycloak.realms().create(rep);
 
-        setupMfaClientForRealm(req.getRealmName()); // Critical: call setup explicitly
+        setupMfaClientForRealm(req.getName());
     }
 
-    public List<RealmSummaryDto> listRealms() {
+    public List<UserGroupApiV1> listUserGroups() {
         return keycloak.realms().findAll().stream()
-                .map(r -> new RealmSummaryDto(
+                .map(r -> new UserGroupApiV1(
                         r.getId(),
-                        (r.getDisplayName() != null && !r.getDisplayName().isBlank())
-                                ? r.getDisplayName()
-                                : r.getRealm()
-                ))
+                        r.getRealm(),
+                        r.getDisplayName()))
                 .toList();
+    }
+
+    public UserGroupApiV1 getUserGroupById(String userGroupId) {
+        RealmRepresentation realm = keycloak.realms().findAll().stream()
+                .filter(r -> r.getId().equalsIgnoreCase(userGroupId))
+                .findFirst()
+                .orElseThrow(() ->
+                        new RuntimeException("User group (realm) with id " + userGroupId + " not found"));
+
+        return new UserGroupApiV1(
+                realm.getId(),
+                realm.getRealm(),
+                realm.getDisplayName()
+        );
+    }
+
+    public UserGroupApiV1 patchUserGroupById(String userGroupId, UserGroupApiV1 userGroupApiV1) {
+        RealmRepresentation existingRealm = keycloak.realms().findAll().stream()
+                .filter(r -> r.getId().equalsIgnoreCase(userGroupId))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Realm with id " + userGroupId + " not found"));
+
+        RealmResource realmResource = keycloak.realm(existingRealm.getRealm());
+
+
+        if (userGroupApiV1.getName() != null && !userGroupApiV1.getName().isBlank()) {
+            existingRealm.setRealm(userGroupApiV1.getName());
+        }
+
+        if (userGroupApiV1.getDisplayName() != null && !userGroupApiV1.getDisplayName().isBlank()) {
+            existingRealm.setDisplayName(userGroupApiV1.getDisplayName());
+        }
+
+        realmResource.update(existingRealm);
+
+        RealmRepresentation updated = keycloak.realm(existingRealm.getRealm()).toRepresentation();
+
+        return new UserGroupApiV1(
+                updated.getId(),
+                updated.getRealm(),
+                updated.getDisplayName()
+        );
     }
 
     public void deleteRealm(String realmName) {

@@ -5,6 +5,8 @@ import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
 import jakarta.annotation.PostConstruct;
+import lombok.AllArgsConstructor;
+import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,10 +23,10 @@ import java.util.Date;
 public class JwtService {
 
     @Value("${jwt.secret}")
-    private final String secret;
+    private String secret;
 
     @Value("${jwt.exp-minutes}")
-    private final long expMinutes;
+    private long expMinutes;
 
     private SecretKey key;
 
