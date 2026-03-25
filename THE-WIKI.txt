@@ -1,0 +1,1066 @@
+## Purpose
+
+The objective of this microservice is to provide **Identity & Access Management** capabilities for the SD-WAN platform, acting as the backend adapter/orchestrator around **Keycloak** for:
+
+- user group (realm/tenant) lifecycle management
+- user lifecycle management inside a user group
+- authentication flows, including **optional MFA** (Email OTP / SMS OTP / TOTP)
+
+In that sense, this microservice exposes a set of operations that can be used by upstream consumers (e.g. sdwan-portal-api) to manage tenants/users and authenticate users in a consistent way.
+
+## Features
+
+The following diagram shows the features available for this microservice:
+
+```plantuml
+@startmindmap
+!theme bluegray
+
+* Identity Access API
+** Auth
+*** Login (optional MFA)
+*** MFA Email OTP
+**** Send
+**** Verify
+*** MFA SMS OTP
+**** Send
+**** Verify
+*** MFA TOTP
+**** Enroll (email action)
+**** Start browser session (OIDC auth)
+**** Callback (OIDC code)
+**** Verify (direct grant + totp)
+** Profile
+*** Set email
+*** Status (email missing/verified, totp configured)
+*** Verify email (Keycloak action email)
+** User Groups (Tenants / Realms)
+*** Create
+*** List
+*** Get by id
+*** Update
+*** Delete
+** Users
+*** Create
+*** List
+*** Get by id
+*** Update
+*** Delete
+** Secure
+*** Ping (JWT protected)
+@endmindmap
+```
+
+### Auth
+
+This feature exists to give support for upstream API consumers whenever they want to perform authentication operations against the identity provider (Keycloak), including MFA orchestration.
+
+In the next subsections we will be describing this module use cases.
+
+* **Login (username/password with optional MFA)**
+
+Through this use case, the API consumer is able to perform an initial login attempt using username and password.  
+Depending on configuration and user state, the response indicates whether MFA is required, what methods are available, and what the user still needs to configure.
+
+**[POST]** _/v1/auth/login_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "Keycloak Admin API" as kcAdmin
+participant "Keycloak Token (Direct Grant)" as kcToken
+participant "PendingMfaStore" as store
+participant "JwtService" as jwt
+
+activate actor
+actor -> controller : POST /v1/auth/login (username, password, user_group_id, mfaEnabled?)
+activate controller
+controller -> service : authLogin(LoginRequestApiV1, mfaEnabled)
+activate service
+
+service -> kcAdmin : resolve realm by user_group_id\n(search realms, pick realm name)
+kcAdmin --> service : realmName / RealmResource
+service -> kcAdmin : search user by username
+kcAdmin --> service : userId (or not found)
+
+alt user not found
+  service --> controller : HTTP 404 USER_NOT_FOUND
+else user found
+  service -> kcToken : validateCredentialsDetailed(realm, username, password)\n(using direct grant)
+  kcToken --> service : ok / error details
+
+  alt invalid password / login failed
+    service --> controller : HTTP 401 INVALID_PASSWORD or LOGIN_FAILED
+  else credentials ok
+    alt MFA disabled or not required
+      service -> jwt : issue(realm, userId, username)
+      jwt --> service : token
+      service --> controller : HTTP 200 (mfaRequired=false, token)
+    else MFA required
+      service -> store : create loginAttemptId\n(store realm/userId/username/(password if needed))
+      store --> service : loginAttemptId
+      service --> controller : HTTP 200 (mfaRequired=true,\nloginAttemptId, methods, needs)
+    end
+  end
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+The request consists of:
+
+* userGroupId (tenant/realm identifier)
+* username
+* password
+* optional query parameter: mfaEnabled (defaults to true)
+
+In order to get to this result the following steps are performed:
+
+1. We resolve the Keycloak realm based on the provided user group id
+2. We locate the user inside that realm by username
+3. We validate credentials using Keycloak direct grant
+4. If MFA is disabled (or not required), we issue a final JWT and return it
+5. Otherwise, we create and return a loginAttemptId and indicate which MFA methods can be used and which setup steps are still required
+
+<br>
+
+* **MFA Email OTP - Send**
+
+Through this use case, the API consumer requests the system to send a one-time password to the user email address (stored in Keycloak).
+
+**[POST]** _/v1/auth/mfa/email/send_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Admin API" as kcAdmin
+participant "EmailSender" as email
+
+activate actor
+actor -> controller : POST /v1/auth/mfa/email/send (loginAttemptId)
+activate controller
+controller -> service : authMfaEmailSend(loginAttemptId)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  service -> kcAdmin : read user (realm, userId)\nget email
+  kcAdmin --> service : email (or missing)
+  alt no email
+    service --> controller : HTTP 400 NO_EMAIL_ON_ACCOUNT
+  else email ok
+    service -> store : setEmailOtp(loginAttemptId, code, exp)
+    service -> email : sendOtp(email, code)
+    email --> service : ok
+    service --> controller : HTTP 200 {sent:true}
+  end
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **MFA Email OTP - Verify**
+
+Through this use case, the API consumer verifies the OTP code sent by email.  
+On success, a final JWT token is issued.
+
+**[POST]** _/v1/auth/mfa/email/verify_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "JwtService" as jwt
+
+activate actor
+actor -> controller : POST /v1/auth/mfa/email/verify (loginAttemptId, code)
+activate controller
+controller -> service : authMfaEmailVerify(loginAttemptId, code)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  service -> store : consumeValidEmailOtp(loginAttemptId, code)
+  alt invalid/expired otp
+    service --> controller : HTTP 400 INVALID_OR_EXPIRED_OTP
+  else otp ok
+    service -> jwt : issue(realm, userId, username)
+    jwt --> service : token
+    service -> store : remove(loginAttemptId)
+    service --> controller : HTTP 200 FinalTokenResponseApiV1(token)
+  end
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **MFA SMS OTP - Send**
+
+Through this use case, the API consumer requests the system to send a one-time password to the user phone number (stored in Keycloak, e.g. as an attribute).
+
+**[POST]** _/v1/auth/mfa/sms/send_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Admin API" as kcAdmin
+participant "SmsService" as sms
+
+activate actor
+actor -> controller : POST /v1/auth/mfa/sms/send (loginAttemptId)
+activate controller
+controller -> service : authMfaSmsSend(loginAttemptId)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  service -> kcAdmin : read user attributes\nget phone (E.164)
+  kcAdmin --> service : phone (or missing)
+  alt no phone
+    service --> controller : HTTP 400 NO_PHONE_ON_ACCOUNT
+  else phone ok
+    service -> store : setSmsOtp(loginAttemptId, code, exp)
+    service -> sms : sendSms(phone, ...)
+    sms --> service : ok
+    service --> controller : HTTP 200 {sent:true}
+  end
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **MFA SMS OTP - Verify**
+
+Through this use case, the API consumer verifies the OTP code sent by SMS.  
+On success, a final JWT token is issued.
+
+**[POST]** _/v1/auth/mfa/sms/verify_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Admin API" as kcAdmin
+participant "JwtService" as jwt
+
+activate actor
+actor -> controller : POST /v1/auth/mfa/sms/verify (loginAttemptId, code)
+activate controller
+controller -> service : authMfaSmsVerify(loginAttemptId, code)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  service -> kcAdmin : ensure phone exists (E.164)
+  kcAdmin --> service : phone (or missing)
+
+  alt no phone
+    service --> controller : HTTP 400 NO_PHONE_ON_ACCOUNT
+  else phone ok
+    service -> store : consumeValidSmsOtp(loginAttemptId, code)
+    alt invalid/expired otp
+      service --> controller : HTTP 400 INVALID_OR_EXPIRED_OTP
+    else otp ok
+      service -> jwt : issue(realm, userId, username)
+      jwt --> service : token
+      service -> store : remove(loginAttemptId)
+      service --> controller : HTTP 200 FinalTokenResponseApiV1(token)
+    end
+  end
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **MFA TOTP - Enroll**
+
+Through this use case, the API consumer triggers TOTP enrollment.  
+The system asks Keycloak to send an action email to the user to configure TOTP (CONFIGURE_TOTP required action).
+
+**[POST]** _/v1/auth/mfa/totp/enroll_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : POST /v1/auth/mfa/totp/enroll (loginAttemptId)
+activate controller
+controller -> service : authMfaTotpEnroll(loginAttemptId)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  service -> kcAdmin : check if user already has OTP configured
+  alt already configured
+    service --> controller : HTTP 200 {alreadyConfigured:true}
+  else not configured
+    service -> kcAdmin : executeActionsEmail(CONFIGURE_TOTP)
+    kcAdmin --> service : ok
+    service --> controller : HTTP 200 {emailSent:true}
+  end
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **MFA TOTP - Start Browser Session**
+
+Through this use case, the API consumer requests a Keycloak browser login URL to complete required actions (e.g. configure TOTP) and then return via callback.
+
+**[POST]** _/v1/auth/mfa/totp/start-session_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Admin API" as kcAdmin
+participant "Keycloak OIDC Auth Endpoint" as kcAuth
+
+activate actor
+actor -> controller : POST /v1/auth/mfa/totp/start-session (loginAttemptId)
+activate controller
+controller -> service : authMfaTotpStartSession(loginAttemptId)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  service -> kcAdmin : ensure CONFIGURE_TOTP required action exists\n(if OTP not configured yet)
+  kcAdmin --> service : ok
+
+  service -> store : bindState(state, loginAttemptId)
+  store --> service : ok
+
+  service -> kcAuth : build authUrl (client_id, redirect_uri, state, nonce, ...)
+  service --> controller : HTTP 200 StartTotpSessionResponseApiV1(redirectUrl)
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **MFA TOTP - Callback**
+
+Through this use case, Keycloak redirects back to the backend callback endpoint after the browser flow (authorization code flow).  
+The backend optionally exchanges the authorization code for a token (PoC), and then redirects the browser onward.
+
+**[GET]** _/v1/auth/mfa/totp/callback_
+
+```plantuml
+!theme bluegray
+
+actor Browser as actor
+participant "Keycloak" as kc
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Token Endpoint" as kcToken
+
+activate Browser
+Browser -> kc : User completes CONFIGURE_TOTP
+kc -> Browser : redirect to /v1/auth/mfa/totp/callback?code=...&state=...
+Browser -> service : GET /v1/auth/mfa/totp/callback (code, state)
+activate service
+
+service -> store : lookup/bind state (optional)
+store --> service : loginAttemptId (optional)
+
+opt exchange code for token (PoC)
+  service -> kcToken : POST /token (authorization_code)
+  kcToken --> service : HTTP 200/4xx (ignored in PoC)
+end
+
+service -> store : cleanup state
+service --> Browser : HTTP 302 FOUND (redirect)
+deactivate service
+deactivate Browser
+```
+
+<br>
+
+* **MFA TOTP - Verify**
+
+Through this use case, the API consumer verifies a TOTP code by performing a Keycloak direct grant request that includes the TOTP code.  
+On success, a final JWT token is issued.
+
+**[POST]** _/v1/auth/mfa/totp/verify_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Token (Direct Grant + TOTP)" as kcToken
+participant "JwtService" as jwt
+
+activate actor
+actor -> controller : POST /v1/auth/mfa/totp/verify (loginAttemptId, code)
+activate controller
+controller -> service : authMfaTotpVerify(loginAttemptId, code)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  alt password missing in attempt
+    service --> controller : HTTP 400 PASSWORD_MISSING
+  else password present
+    service -> kcToken : validateCredentialsWithTotp(realm, username, password, totpCode)
+    kcToken --> service : ok / invalid
+    alt invalid totp
+      service --> controller : HTTP 400 INVALID_TOTP
+    else ok
+      service -> jwt : issue(realm, userId, username)
+      jwt --> service : token
+      service -> store : remove(loginAttemptId)
+      service --> controller : HTTP 200 FinalTokenResponseApiV1(token)
+    end
+  end
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+### Profile
+
+This feature exists to allow the API consumer to update and verify user profile properties relevant to authentication (email presence/verification, TOTP configured).
+
+* **Set Email**
+
+Through this use case, the API consumer updates the user email and marks it as not verified.
+
+**[POST]** _/v1/auth/profile/email_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : POST /v1/auth/profile/email (loginAttemptId, email)
+activate controller
+controller -> service : authProfileSetEmail(loginAttemptId, email)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  alt bad email
+    service --> controller : HTTP 400 BAD_EMAIL
+  else email ok
+    service -> kcAdmin : update user email\nset emailVerified=false
+    kcAdmin --> service : ok
+    service --> controller : HTTP 200 {updated:true}
+  end
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **Profile Status**
+
+Through this use case, the API consumer retrieves status flags needed by the frontend to guide the user through setup:
+
+- emailMissing
+- emailVerified
+- hasTotp
+
+**[GET]** _/v1/auth/profile/status_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : GET /v1/auth/profile/status?loginAttemptId=...
+activate controller
+controller -> service : authProfileStatus(loginAttemptId)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  service -> kcAdmin : read user representation\n(email, emailVerified, credentials)
+  kcAdmin --> service : user profile data
+  service --> controller : HTTP 200 {emailMissing, emailVerified, hasTotp}
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **Verify Email (send verification email)**
+
+Through this use case, the API consumer triggers Keycloak to send a VERIFY_EMAIL action email to the user.
+
+**[POST]** _/v1/auth/profile/verify-email_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "PendingMfaStore" as store
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : POST /v1/auth/profile/verify-email (loginAttemptId)
+activate controller
+controller -> service : authProfileVerifyEmail(loginAttemptId)
+activate service
+
+service -> store : get(loginAttemptId)
+alt invalid attempt
+  service --> controller : HTTP 400 INVALID_ATTEMPT
+else valid attempt
+  service -> kcAdmin : executeActionsEmail(VERIFY_EMAIL)
+  kcAdmin --> service : ok
+  service --> controller : HTTP 200 {emailSent:true}
+end
+
+deactivate service
+controller -> actor : HTTP response
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+### User Groups
+
+This feature exists to provide tenant/user-group lifecycle management (typically implemented as Keycloak realms).
+
+In the next subsections we will be describing this module use cases.
+
+* **Create User Group**
+
+Through this use case, the API consumer creates a new user group (tenant). This typically results in a new Keycloak realm being created and initialized.
+
+**[POST]** _/v1/userGroups_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserGroupService" as ugSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : POST /v1/userGroups (UserGroupCreateRequestApiV1)
+activate controller
+controller -> service : addUserGroupV1(request)
+activate service
+
+service -> ugSvc : createRealm(request)
+activate ugSvc
+ugSvc -> kcAdmin : create realm + initial settings
+kcAdmin --> ugSvc : created / ok
+ugSvc --> service : ok
+deactivate ugSvc
+
+service --> controller : HTTP 201 CREATED
+deactivate service
+controller -> actor : HTTP 201 CREATED
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **List User Groups**
+
+Through this use case, the API consumer retrieves the list of user groups (tenants).
+
+**[GET]** _/v1/userGroups_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserGroupService" as ugSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : GET /v1/userGroups
+activate controller
+controller -> service : userGroupsLookupV1()
+activate service
+
+service -> ugSvc : listUserGroups()
+activate ugSvc
+ugSvc -> kcAdmin : list realms (mapped to UserGroupApiV1)
+kcAdmin --> ugSvc : realms
+ugSvc --> service : List<UserGroupApiV1>
+deactivate ugSvc
+
+service --> controller : HTTP 200 OK
+deactivate service
+controller -> actor : HTTP 200 OK
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **Get User Group By Id**
+
+Through this use case, the API consumer retrieves a specific user group (tenant) by id.
+
+**[GET]** _/v1/userGroups/{user_group_id}_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserGroupService" as ugSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : GET /v1/userGroups/{user_group_id}
+activate controller
+controller -> service : getUserGroupByIdV1(user_group_id)
+activate service
+
+service -> ugSvc : getUserGroupById(user_group_id)
+activate ugSvc
+ugSvc -> kcAdmin : find realm by id
+kcAdmin --> ugSvc : realm details
+ugSvc --> service : UserGroupApiV1
+deactivate ugSvc
+
+service --> controller : HTTP 200 OK
+deactivate service
+controller -> actor : HTTP 200 OK
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **Update User Group**
+
+Through this use case, the API consumer updates an existing user group (tenant).
+
+**[PUT]** _/v1/userGroups/{user_group_id}_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserGroupService" as ugSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : PUT /v1/userGroups/{user_group_id} (UserGroupApiV1)
+activate controller
+controller -> service : updateUserGroupV1(user_group_id, body)
+activate service
+
+service -> ugSvc : patchUserGroupById(user_group_id, body)
+activate ugSvc
+ugSvc -> kcAdmin : update realm settings/metadata
+kcAdmin --> ugSvc : ok
+ugSvc --> service : updated UserGroupApiV1
+deactivate ugSvc
+
+service --> controller : HTTP 200 OK
+deactivate service
+controller -> actor : HTTP 200 OK
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **Delete User Group**
+
+Through this use case, the API consumer deletes an existing user group (tenant).
+
+**[DELETE]** _/v1/userGroups/{user_group_id}_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserGroupService" as ugSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : DELETE /v1/userGroups/{user_group_id}
+activate controller
+controller -> service : deleteUserGroupByIdV1(user_group_id)
+activate service
+
+service -> ugSvc : delete realm(user_group_id)
+activate ugSvc
+ugSvc -> kcAdmin : delete realm
+kcAdmin --> ugSvc : ok
+ugSvc --> service : ok
+deactivate ugSvc
+
+service --> controller : HTTP 204 NO CONTENT
+deactivate service
+controller -> actor : HTTP 204 NO CONTENT
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+### Users
+
+This feature exists to provide user lifecycle management inside a user group (tenant/realm).
+
+In the next subsections we will be describing this module use cases.
+
+* **Create User**
+
+Through this use case, the API consumer creates a new user inside the specified user group.
+
+**[POST]** _/v1/userGroups/{user_group_id}/users_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserService" as uSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : POST /v1/userGroups/{user_group_id}/users (UserApiV1)
+activate controller
+controller -> service : addUserV1(user_group_id, user)
+activate service
+
+service -> uSvc : createUser(user_group_id, user)
+activate uSvc
+uSvc -> kcAdmin : create user in realm\n(set attributes, credentials, roles if any)
+kcAdmin --> uSvc : created user
+uSvc --> service : UserApiV1
+deactivate uSvc
+
+service --> controller : HTTP 201 CREATED
+deactivate service
+controller -> actor : HTTP 201 CREATED
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **List Users**
+
+Through this use case, the API consumer retrieves all users in a user group.
+
+**[GET]** _/v1/userGroups/{user_group_id}/users_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserService" as uSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : GET /v1/userGroups/{user_group_id}/users
+activate controller
+controller -> service : usersLookupV1(user_group_id)
+activate service
+
+service -> uSvc : listUsers(user_group_id)
+activate uSvc
+uSvc -> kcAdmin : list users in realm
+kcAdmin --> uSvc : users
+uSvc --> service : List<UserApiV1>
+deactivate uSvc
+
+service --> controller : HTTP 200 OK
+deactivate service
+controller -> actor : HTTP 200 OK
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **Get User By Id**
+
+Through this use case, the API consumer retrieves a specific user by id inside a user group.
+
+**[GET]** _/v1/userGroups/{user_group_id}/users/{user_id}_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserService" as uSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : GET /v1/userGroups/{user_group_id}/users/{user_id}
+activate controller
+controller -> service : getUserByIdV1(user_group_id, user_id)
+activate service
+
+service -> uSvc : getUser(user_group_id, user_id)
+activate uSvc
+uSvc -> kcAdmin : get user representation
+kcAdmin --> uSvc : user
+uSvc --> service : UserApiV1
+deactivate uSvc
+
+service --> controller : HTTP 200 OK
+deactivate service
+controller -> actor : HTTP 200 OK
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **Update User**
+
+Through this use case, the API consumer updates a user inside a user group.
+
+**[PUT]** _/v1/userGroups/{user_group_id}/users/{user_id}_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserService" as uSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : PUT /v1/userGroups/{user_group_id}/users/{user_id} (UserApiV1)
+activate controller
+controller -> service : updateUserV1(user_group_id, user_id, body)
+activate service
+
+service -> uSvc : updateUser(user_group_id, user_id, body)
+activate uSvc
+uSvc -> kcAdmin : update user
+kcAdmin --> uSvc : ok
+uSvc --> service : UserApiV1
+deactivate uSvc
+
+service --> controller : HTTP 200 OK
+deactivate service
+controller -> actor : HTTP 200 OK
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+* **Delete User**
+
+Through this use case, the API consumer deletes a user inside a user group.
+
+**[DELETE]** _/v1/userGroups/{user_group_id}/users/{user_id}_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-portal-api" as controller
+participant "sdwan-identity-access-api" as service
+participant "UserService" as uSvc
+participant "Keycloak Admin API" as kcAdmin
+
+activate actor
+actor -> controller : DELETE /v1/userGroups/{user_group_id}/users/{user_id}
+activate controller
+controller -> service : deleteUserByIdV1(user_group_id, user_id)
+activate service
+
+service -> uSvc : deleteUser(user_group_id, user_id)
+activate uSvc
+uSvc -> kcAdmin : delete user
+kcAdmin --> uSvc : ok
+uSvc --> service : ok
+deactivate uSvc
+
+service --> controller : HTTP 204 NO CONTENT
+deactivate service
+controller -> actor : HTTP 204 NO CONTENT
+deactivate controller
+deactivate actor
+```
+
+<br>
+
+### Secure
+
+This module exists to provide a basic authenticated endpoint for verifying that JWT protection is working as expected.
+
+* **Ping**
+
+**[GET]** _/secure/ping_
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-identity-access-api" as service
+
+activate actor
+actor -> service : GET /secure/ping (Authorization: Bearer <jwt>)
+activate service
+service --> actor : HTTP 200 OK {message:"You are authenticated!"}
+deactivate service
+deactivate actor
+```
+
+<br>
+
+## Dependencies
+
+This microservice runtime dependencies are illustrated in the following diagram:
+
+```plantuml
+!theme bluegray
+
+package "OSS LAN" {
+  node SDWAN {
+    HTTP - [sdwan-identity-access-api]
+    [sdwan-portal-api]
+  }
+  node IDENTITY {
+    [Keycloak]
+  }
+  node NOTIFICATION {
+    [SMTP / Email Provider]
+    [SMS Provider]
+  }
+}
+
+[sdwan-portal-api] --> [sdwan-identity-access-api]
+[sdwan-identity-access-api] --> [Keycloak]
+[sdwan-identity-access-api] --> [SMTP / Email Provider]
+[sdwan-identity-access-api] --> [SMS Provider]
+```
+
+As can be seen in the image above, the dependencies include:
+
+* Keycloak: identity provider used for realms (user groups), users, required actions and authentication validation (direct grant / browser flows)
+* SMTP / Email provider: used to send OTP and/or Keycloak action emails (depending on environment configuration)
+* SMS provider: used to send OTP codes by SMS
+* Upstream consumer (e.g. sdwan-portal-api): uses this microservice as the single entry point for identity/tenant/user operations and MFA orchestration
