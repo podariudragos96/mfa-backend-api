@@ -1,0 +1,424 @@
+[[_TOC_]]
+
+<br><br>
+
+## Purpose
+
+The objective of this microservice is to contain business logic related to customers (users, tenants and branding).
+
+## Features
+
+The following diagram presents the features avaialable for this microservice.
+
+```plantuml
+@startmindmap
+!theme bluegray
+
+* SDWAN Customer API
+** Customer API
+*** Create user
+*** Get user
+*** Get users
+*** Update user
+** Tenant API
+*** Add tenant
+*** Get tenant
+*** Get tenants
+*** Get tenant's users
+*** Update tenant
+** Tenant User API
+*** Create tenant's user
+*** Get tenant's user
+*** Update tenant's user
+*** Delete tenant's user
+** Authenticate API
+*** Authenticate user
+** Branding API
+*** Create branding details
+*** Get branding details
+*** Update branding details
+*** Upload branding asset
+*** Get branding asset
+*** Delete branding asset
+** APIUser API
+*** Generate APIUser key
+*** Renew APIUser key
+*** Get APIUser details
+*** Delete APIUser key
+@endmindmap
+```
+
+## Whitelabel in SD-WAN:
+
+### Overview
+
+This feature allows to sell Colt Portal with a different Design so our client can pretend it's their portal.
+
+```plantuml
+@startuml
+
+!theme bluegray
+
+package portal as "SD-WAN Portal (Reseller branding)" {
+rectangle "sdwan-portal-api-v3"
+}
+
+package tenantUsers as "Tenant's Users" {
+:Tenant User ..:
+:Tenant User 2:
+:Tenant User 1:
+}
+
+portal <-- :Tenant User 1:
+portal <-- :Tenant User 2:
+portal <-- :Tenant User ..:
+
+:Tenant: <-- tenantUsers 
+@enduml
+```
+
+### Feature Requirement
+
+#### Order Flag
+- **DELIVERY_CHANNEL** must be one of those: **RESELLER**, **WLC** or **WLEC**.
+
+#### Database
+
+When **DELIVERY_CHANNEL** enables whitelabel the customer database will be configured as follow:
+
+- The customer will be created with is_white_label = 1
+![image](uploads/c9ec1e54e8196adced833609de67b96f/image.png)
+
+- The tenant will have a reseller_domain
+![image](uploads/c8b2355093cc6689588a4e35c063f7cd/image.png)
+
+- The branding will be found by reseller domain
+![image](uploads/1fc30a831ebccc855ca6c1ec1ba41b2e/image.png)
+
+#### Branding files
+
+- Branding Volume
+![image](uploads/48a46f645812ca84198425708859332e/image.png)
+
+- Content of the branding volume
+![image](uploads/b1c6b78aa0a6625c26a432c4b95aa88b/image.png)
+
+#### Webserver
+
+- DevOps needs to point the url to sd-wan portal (for http + websocket)
+- DevOps needs to add the certificate
+
+#### Branding Request
+
+- When you open the login page a http request is called with a request header Host: global-sdwan-c.swisscom.ch
+![image](uploads/9a9681ef669f13b61f8aa2ff52e88eca/image.png)
+
+#### Reseller page view
+
+- As seen below for swisscom: https://global-sdwan-c.swisscom.ch
+
+![image](uploads/fb25e62aafaab66769b4ee2d8e006fef/image.png)
+**Note:** The logo, forgot password and footer are customizable.
+
+![image](uploads/9e32b36b8c8abcc387a90cd8fd4eebe0/image.png)
+**Note:** Customised: logo, (account)-> help, footer
+
+#### Colt Online
+- The user must have the role **SD-WANRWWLTenantRole** to access the tenant mamangement tab.
+![image](uploads/48e965fa338bb92729bea40af5eefe60/image.png)
+
+## API User:
+
+### Overview
+
+Is a tactical solution developed to provide an alternative authentication mechanism to enable the customer to directly access our Portal API.
+This microservice is responsible for managing the api users of each tenant, as well as their respective api keys.
+
+### Features
+
+The following chapter is related to the APIUser's features avaialable in this microservice:
+
+* [Get APIUsers' details](#get-apiusers-details)
+* [Generate APIUser key](#generate-apiuser-key)
+* [Renew APIUser key](#renew-apiuser-key)
+* [Delete APIUser key](#delete-apiuser-key)
+
+<br>
+
+#### **_Get APIUsers Details_**
+
+Through this use case, an API consumer is able to retrieve information from API Users based on specific criteria.
+
+**\[GET\]** \_/v1/apiuser
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-customer-api" as service1
+participant "oracleDB (Customer)" as service2
+
+activate actor
+actor -> service1 : GET /api/v1/apiuser
+activate service1
+service1 -> service2 : findByCriteria()
+activate service2
+service2 --> service1 : Query result (List<ApiUser>)
+deactivate service2
+service1 --> actor : HTTP 200 OK
+deactivate service1
+deactivate actor
+```
+
+<br><br>
+
+
+#### **_Generate APIUser Key_**
+
+Through this use case, an API consumer is able to generate API User key for the tenant.
+
+**\[POST\]** \_/v1/tenants/{tenant_id}/api_key
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-customer-api" as service1
+participant "oracleDB (Customer)" as service2
+
+activate actor
+actor -> service1 : POST /api/v1/tenants/{tenant_id}/api_key
+activate service1
+service1 -> service2 : findByTenantIdAndStatusAndCustomerStatus() [TENANT STATUS = 'ACTIVE' ,CUSTOMER STATUS = 'ACTIVE']
+activate service2
+service2 --> service1 : Query result (Tenant)
+deactivate service2
+
+
+alt if tenant.isPresent() && Boolean.FALSE.equals(tenant.getApiUser())
+    service1 --> actor : HTTP 404 NOT FOUND
+else else
+    service1 -> service2 : findAllByTenantTenantIdInAndTenantApiUser()
+    activate service2
+    service2 --> service1 : Query result (List<ApiUser>)
+    deactivate service2
+
+    alt if existingKeys.isNotEmpty()
+        service1 --> actor : HTTP 200 OK
+    else else
+       service1 -> service2 : saveApiUser()
+       activate service2
+       service2 --> service1 : Query result (+1 row updated)
+       deactivate service2
+       service1 --> actor : HTTP 200 OK
+       deactivate service1
+    end
+end
+deactivate actor
+```
+
+<br><br>
+
+
+#### **_Renew APIUser Key_**
+
+Through this use case, an API consumer is able to renew API User key for his tenants.
+
+**\[PUT\]** \_/v1/apiuser/api_key/renew
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-customer-api" as service1
+participant "oracleDB (Customer)" as service2
+
+activate actor
+actor -> service1 : POST /api/v1/apiuser/api_key/renew
+activate service1
+service1 -> service2 : findByTenantIdAndStatusAndCustomerStatus() [TENANT STATUS = 'ACTIVE' ,CUSTOMER STATUS = 'ACTIVE']
+activate service2
+service2 --> service1 : Query result (List<Tenant>)
+deactivate service2
+service1 -> service1 : tenants.filterTenantsWithApiUserEnabled()
+activate service1
+deactivate service1
+service1 -> service2 : findAllByTenantTenantIdIn()
+activate service2
+service2 --> service1 : Query result (List<ApiUser>)
+deactivate service2
+
+loop for each apiUser
+    alt if doesKeyRequireRegeneration()
+       service1 -> service2 : saveApiUser()
+       activate service2
+       service2 --> service1 : Query result (+1 row updated)
+       deactivate service2
+       service1 -> service1 : incrementRenewCount() (+1)
+       activate service1
+       deactivate service1
+    end
+end
+
+alt if renewCount.get() < 1
+    service1 --> actor : HTTP 400 BAD REQUEST
+else else
+    service1 --> actor : HTTP 200 OK
+end
+deactivate actor
+```
+
+<br><br>
+
+
+#### **_Delete APIUser Key_**
+
+Through this use case, an API consumer is able to delete API Users details based on api_key.
+
+**\[DELETE\]** \_/v1/apiuser/{api_key}
+
+```plantuml
+!theme bluegray
+
+actor Consumer as actor
+participant "sdwan-customer-api" as service1
+participant "oracleDB (Customer)" as service2
+
+activate actor
+actor -> service1 : DELETE /api/v1/apiuser/{api_key}
+activate service1
+service1 -> service2 : findByApiKey()
+activate service2
+service2 --> service1 : Query result (ApiUser)
+deactivate service2
+
+
+alt if apiUser.isPresent()
+    service1 -> service2 : deleteById()
+    activate service2
+    service2 --> service1 : Query result (+1 row deleted)
+    deactivate service2
+end
+
+deactivate actor
+```
+
+### CronJobs
+
+The following chapter is related to the APIUser's cronjobs avaialable in this microservice:
+
+* [Scheduled Api Key CleanUp](#_scheduled-api-key-cleanUp)
+
+<br>
+
+#### **_Scheduled Api Key CleanUp_**
+
+The objective of this job is to clean up the already expired keys, and also to produce a report of the keys that are about to expire and send it via email.
+
+**\[GET\]** \_/v1/apiuser
+
+```plantuml
+!theme bluegray
+
+!theme bluegray
+
+box "sdwan-customer-api" #LightBlue
+participant Scheduler as scheduler 
+participant "ApiUserService" as service1
+participant "EmailService" as service3
+end box
+participant "oracleDB (Customer)" as service2
+participant "Email Server" as service4
+
+
+loop At 12:00 AM, on day 1 of the month
+    activate scheduler
+    scheduler -> service1 : expireInvalidApiKeys()
+    deactivate scheduler
+    
+    activate service1
+    service1 -> service2 : findAll()
+
+    activate service2
+    service2 --> service1 : Query result (List<ApiUser>)
+    deactivate service2
+    
+    loop for each apiUser
+        alt if isKeyAlreadyExpired()
+            
+            service1 -> service2 : deleteById()
+            note right
+                By default, for the key to be deleted, it must have expired 1 month ago.
+            end note
+            activate service2
+            service2 --> service1 : Query result (+1 row deleted)
+            deactivate service2
+        else
+            alt if doesKeyRequireRegeneration()
+                service1 -> service1 : renewReportList.add() (+1)
+                note right
+                    For the key to be in the renewal period, it must be about to expire and none other valid key exists for that tenant. 
+                    By default, this period starts 2 months before the due date.
+                end note
+
+                activate service1
+                deactivate service1    
+            end
+        end
+    end
+
+    alt if renewReportList.isNotEmpty()
+ 
+        service1 -> service1 : prepareEmailReport()
+        activate service1
+        deactivate service1
+
+
+        service1 -> service3 : sendEmail()
+        deactivate service1
+        activate service3
+
+        service3 -> service4 : send()
+        deactivate service3
+        activate service4
+        deactivate service4
+
+    end
+end
+```
+
+<br><br>
+
+
+---
+
+
+## Dependencies
+
+This micro-service runtime dependencies are illustrated in the following diagram:
+
+```plantuml
+!theme bluegray
+
+package "IT LAN" {
+  node SDWAN {
+    HTTP - [sdwan-customer-api]
+    queue rabbitmq
+    database "Oracle Database (Customer)"
+  }
+}
+
+cloud {
+   queue "Email Server"
+}
+
+[sdwan-customer-api] ..> rabbitmq
+[sdwan-customer-api] --> "Oracle Database (Customer)" : "Data access"
+[sdwan-customer-api] --> "Email Server"
+```
+
+As showned in the image above, the dependencies include:
+
+* **rabbitMQ (IT Layer)**: This dependency is used to allow the consumption of spring cloud properties to define enviromnet variables.
+* **Oracle Database**: This dependency is solely used to store/retrieve information relevant regarding sessions.
+* **Email Server**: This dependency is solely used to send out emails informing about cronjob outcomes.
